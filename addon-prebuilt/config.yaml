@@ -1,0 +1,62 @@
+name: "go2rtc (Pre-built)"
+description: "Ultimate camera streaming application using pre-built pk802/go2rtc image"
+version: "1.9.4"
+slug: "go2rtc-prebuilt"
+arch:
+  - aarch64
+  - amd64
+  - armhf
+  - armv7
+  - i386
+init: false
+startup: services
+stage: stable
+
+url: "https://github.com/pk802/go2rtc"
+
+# Use your pre-built image instead of building from source
+image: "ghcr.io/pk802/go2rtc:latest"
+
+map:
+  - "config:rw"
+  - "ssl:ro"
+  - "media:rw"
+  - "backup:rw"
+
+ports:
+  "1984/tcp": 1984
+  "8554/tcp": 8554
+  "8555/tcp": 8555
+
+ports_description:
+  "1984/tcp": "Web UI and API"
+  "8554/tcp": "RTSP TCP server"
+  "8555/tcp": "RTSP UDP server"
+
+options:
+  log_level: "info"
+  streams: {}
+  api:
+    listen: ":1984"
+    origin: "*"
+  webrtc:
+    candidates: []
+  rtsp:
+    listen: ":8554"
+
+schema:
+  log_level: "list(trace|debug|info|warn|error|fatal|panic)?"
+  streams: "dict?"
+  api:
+    listen: "str?"
+    origin: "str?"
+    username: "str?"
+    password: "str?"
+  webrtc:
+    candidates: ["str"]
+  rtsp:
+    listen: "str?"
+    username: "str?"
+    password: "str?"
+
+host_network: true
