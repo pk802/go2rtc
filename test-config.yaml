@@ -1,0 +1,40 @@
+log:
+  level: info    # default level
+  api: info      # reduced from trace to eliminate routine call logging
+  exec: info     # reduced from debug  
+  ngrok: info
+  rtsp: info
+  streams: info
+  webrtc: info
+  format: text
+streams:
+  pk_cabin_camera:
+  - rtsp://192.168.29.150:8554/pk_cabin_camera
+  developers_camera:
+  - rtsp://192.168.29.150:8554/developers_camera
+  outside_camera:
+  - rtsp://192.168.29.150:8554/outside_camera
+  reception_camera:
+  - rtsp://192.168.29.150:8554/reception_camera
+  sales_camera:
+  - rtsp://192.168.29.150:8554/sales_camera
+  da_camera:
+  - rtsp://192.168.29.150:8554/da_camera
+  account_camera:
+  - rtsp://192.168.29.150:8554/account_camera
+  pantry_camera:
+  - rtsp://192.168.29.150:8554/pantry_camera
+  conference_camera:
+  - rtsp://192.168.29.150:8554/conference_camera
+   
+webrtc:
+  candidates:
+  - stun:stun.l.google.com:19302
+  - stun:stun1.l.google.com:19302
+  - stun:global.stun.twilio.com:3478
+  - stun:relay.nextcloud.com:3478
+  - 192.168.29.150:8555
+  - stun:8555
+
+api:
+  origin: '*'

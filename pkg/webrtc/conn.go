@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/AlexxIT/go2rtc/pkg/core"
@@ -22,6 +23,22 @@ type Conn struct {
 
 	offer  string
 	closed core.Waiter
+
+	// Pause/resume functionality
+	paused   atomic.Bool
+	ringType atomic.Value // "main" or "sub" for stream quality switching
+
+	// Stream source for motion detection mapping
+	StreamSource string `json:"stream_source,omitempty"`
+	
+	// Viewer ID for per-viewer control (client-generated)
+	ViewerID string `json:"viewer_id,omitempty"`
+	
+	// Session ID for server-controlled pause/resume
+	SessionID string `json:"session_id,omitempty"`
+	
+	// Client IP address for session tracking
+	ClientIP string `json:"client_ip,omitempty"`
 }
 
 func NewConn(pc *webrtc.PeerConnection) *Conn {
@@ -217,4 +234,56 @@ func sanitizeIP6(host string) string {
 		return "[" + host + "]"
 	}
 	return host
+}
+
+// Pause/Resume Methods
+
+// Pause pauses the WebRTC stream by setting the paused flag
+func (c *Conn) Pause() {
+	c.paused.Store(true)
+}
+
+// Resume resumes the WebRTC stream and requests a keyframe
+func (c *Conn) Resume() {
+	c.paused.Store(false)
+	c.requestKeyframe()
+}
+
+// IsPaused returns the current pause state
+func (c *Conn) IsPaused() bool {
+	return c.paused.Load()
+}
+
+// SetRingType sets the stream quality type
+func (c *Conn) SetRingType(ringType string) {
+	c.ringType.Store(ringType)
+}
+
+// GetRingType returns the current ring type
+func (c *Conn) GetRingType() string {
+	if val := c.ringType.Load(); val != nil {
+		if s, ok := val.(string); ok {
+			return s
+		}
+	}
+	return "main" // default
+}
+
+// requestKeyframe sends a PLI (Picture Loss Indication) to request a keyframe
+func (c *Conn) requestKeyframe() {
+	for _, receiver := range c.pc.GetReceivers() {
+		if receiver.Track() == nil {
+			continue
+		}
+		
+		params := []rtcp.Packet{
+			&rtcp.PictureLossIndication{
+				MediaSSRC: uint32(receiver.Track().SSRC()),
+			},
+		}
+		
+		if err := c.pc.WriteRTCP(params); err != nil {
+			// Don't log errors as they're common during connection setup/teardown
+		}
+	}
 }

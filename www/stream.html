@@ -13,6 +13,7 @@
             padding: 0;
             display: flex;
             font-family: Arial, Helvetica, sans-serif;
+            flex-direction: column;
         }
 
         html, body {
@@ -24,10 +25,76 @@
             flex-wrap: wrap;
             align-content: flex-start;
             align-items: flex-start;
+            flex: 1;
+        }
+        
+        .controls-panel {
+            background: #333;
+            color: white;
+            padding: 10px;
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            flex-wrap: wrap;
+            min-height: 40px;
+        }
+        
+        .control-group {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .control-btn {
+            padding: 6px 12px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: bold;
+            font-size: 12px;
+            min-width: 70px;
+        }
+        
+        .pause-btn { background: #ffc107; color: black; }
+        .resume-btn { background: #28a745; color: white; }
+        .quality-btn { background: #6c757d; color: white; }
+        
+        .status-text {
+            color: #ccc;
+            font-size: 12px;
+            font-family: monospace;
+        }
+        
+        .bandwidth-monitor {
+            color: #8bc34a;
+            font-size: 11px;
+        }
+        
+        .video-container {
+            flex: 1;
+            display: flex;
         }
     </style>
 </head>
 <body>
+<!-- Pause/Resume Controls Panel -->
+<div class="controls-panel">
+    <div class="control-group">
+        <label>Stream Controls:</label>
+        <button class="control-btn pause-btn" onclick="pauseStream()">⏸️ PAUSE</button>
+        <button class="control-btn resume-btn" onclick="resumeStream()">▶️ RESUME</button>
+    </div>
+
+    <div class="control-group">
+        <span class="status-text" id="status">Ready</span>
+        <span class="bandwidth-monitor" id="bandwidth">Monitor bandwidth in DevTools</span>
+    </div>
+</div>
+
+<!-- Video Container -->
+<div class="video-container" id="videoContainer">
+</div>
+
 <script type="module" src="./video-stream.js"></script>
 <script type="module">
     const params = new URLSearchParams(location.search);
@@ -44,12 +111,24 @@
         modes.push(modes[0]);
     }
 
+    const videoContainer = document.getElementById('videoContainer');
+    
     if (streams.length > 1) {
-        document.body.className = 'flex';
+        videoContainer.className = 'flex';
     }
 
     const background = params.get('background') !== 'false';
     const width = '1 0 ' + (params.get('width') || '320px');
+
+    // Store video streams for control access
+    window.videoStreams = [];
+    window.activeConnections = [];
+
+    // Generate unique viewer ID for this browser tab/session
+    if (!window.viewerID) {
+        window.viewerID = 'viewer_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+        console.log('Generated viewer ID:', window.viewerID);
+    }
 
     for (let i = 0; i < streams.length; i++) {
         /** @type {VideoStream} */
@@ -57,9 +136,188 @@
         video.background = background;
         video.mode = modes[i] || video.mode;
         video.style.flex = width;
-        video.src = new URL('api/ws?src=' + encodeURIComponent(streams[i]), location.href);
-        document.body.appendChild(video);
+        
+        // Add viewer ID to the WebSocket URL for WebRTC connection tracking
+        video.src = new URL('api/ws?src=' + encodeURIComponent(streams[i]) + '&viewer_id=' + encodeURIComponent(window.viewerID), location.href);
+        
+        // Store reference for controls
+        window.videoStreams.push(video);
+        
+        videoContainer.appendChild(video);
+        
+        // Store video element reference for WebSocket access
+        video.streamName = streams[i];
+        
+        // Override the onopen method to track connection
+        const originalOnOpen = video.onopen.bind(video);
+        video.onopen = function() {
+            const result = originalOnOpen();
+            updateStatus(`✅ Connected to ${streams[i]} (Viewer: ${window.viewerID})`);
+            return result;
+        };
+        
+        // Listen for session ID from server
+        video.addEventListener('sessionreceived', function(event) {
+            window.serverSessionID = event.detail.sessionID;
+            console.log('🎯 Server session ID captured:', window.serverSessionID);
+            updateStatus(`✅ Connected to ${streams[i]} (Session: ${window.serverSessionID.substring(0, 8)}...)`);
+        });
     }
+
+    // Control Functions using HTTP API (since WebSocket closes after WebRTC setup)
+    window.pauseStream = function() {
+        // Prefer server session ID over client viewer ID for better control
+        if (window.serverSessionID) {
+            console.log('🔥 PAUSE BUTTON CLICKED - Using server session ID:', window.serverSessionID.substring(0, 8) + '...');
+            
+            fetch('/api/webrtc/session/pause', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    session_id: window.serverSessionID
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                console.log('✅ Session pause response:', data);
+                updateStatus('⏸️ PAUSED (Server-controlled session)');
+            })
+            .catch(error => {
+                console.error('❌ Session pause error:', error);
+                updateStatus('❌ Session pause failed');
+            });
+        } else {
+            console.log('🔥 PAUSE BUTTON CLICKED - Fallback to viewer ID:', window.viewerID);
+            
+            // Fallback to viewer ID method
+            fetch('/api/webrtc/pause', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    action: 'pause',
+                    viewer_id: window.viewerID
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                console.log('✅ Pause response:', data);
+                updateStatus('⏸️ PAUSED - This viewer only');
+            })
+            .catch(error => {
+                console.error('❌ Pause error:', error);
+                updateStatus('❌ Pause failed - ' + error.message);
+            });
+        }
+    };
+
+    window.resumeStream = function() {
+        // Prefer server session ID over client viewer ID for better control
+        if (window.serverSessionID) {
+            console.log('🔥 RESUME BUTTON CLICKED - Using server session ID:', window.serverSessionID.substring(0, 8) + '...');
+            
+            fetch('/api/webrtc/session/resume', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    session_id: window.serverSessionID
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                console.log('✅ Session resume response:', data);
+                updateStatus('▶️ RESUMED (Server-controlled session)');
+            })
+            .catch(error => {
+                console.error('❌ Session resume error:', error);
+                updateStatus('❌ Session resume failed');
+            });
+        } else {
+            console.log('🔥 RESUME BUTTON CLICKED - Fallback to viewer ID:', window.viewerID);
+            
+            // Fallback to viewer ID method
+            fetch('/api/webrtc/resume', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    action: 'resume',
+                    viewer_id: window.viewerID
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                console.log('✅ Resume response:', data);
+                updateStatus('▶️ RESUMED - This viewer only');
+            })
+            .catch(error => {
+                console.error('❌ Resume error:', error);
+                updateStatus('❌ Resume failed - ' + error.message);
+            });
+        }
+    };
+
+
+
+    function updateStatus(message) {
+        const status = document.getElementById('status');
+        const timestamp = new Date().toLocaleTimeString();
+        status.textContent = `[${timestamp}] ${message}`;
+    }
+
+    // Keyboard shortcuts
+    document.addEventListener('keydown', (e) => {
+        if (e.ctrlKey || e.metaKey) return;
+        
+        switch(e.key.toLowerCase()) {
+            case 'p': pauseStream(); break;
+            case 'r': resumeStream(); break;
+        }
+    });
+
+    updateStatus('Ready - Keyboard: (p)ause, (r)esume');
+        
+        // Debug function to check connections
+        window.debugConnections = function() {
+            console.log('🔍 Current viewer ID:', window.viewerID);
+            console.log('🔍 Current session ID:', window.serverSessionID);
+            console.log('Video streams:', window.videoStreams.length);
+            window.videoStreams.forEach((video, i) => {
+                console.log(`Stream ${i}:`, {
+                    streamName: video.streamName,
+                    sessionID: video.sessionID,
+                    hasWS: !!video.ws,
+                    wsState: video.ws ? video.ws.readyState : 'null',
+                    wsStateText: video.ws ? ['CONNECTING', 'OPEN', 'CLOSING', 'CLOSED'][video.ws.readyState] : 'null'
+                });
+            });
+            
+            // Fetch active sessions from server
+            fetch('/api/webrtc/sessions')
+            .then(response => response.json())
+            .then(data => {
+                console.log('🔍 Active sessions from server:', data);
+            })
+            .catch(error => {
+                console.error('❌ Failed to fetch sessions:', error);
+            });
+        };
+        
+        // Auto-check connections every 5 seconds
+        setInterval(() => {
+            const activeCount = window.videoStreams.filter(video => 
+                video.ws && video.ws.readyState === WebSocket.OPEN
+            ).length;
+            if (activeCount === 0) {
+                updateStatus('⚠️ No active WebSocket connections');
+            }
+        }, 5000);
 </script>
 </body>
 </html>
