@@ -1,8 +1,8 @@
 # syntax=docker/dockerfile:labs
 
 # 0. Prepare images
-# Use stable debian bookworm instead of trixie for better reliability
-ARG DEBIAN_VERSION="bookworm-slim"
+# Try trixie for latest ffmpeg, fallback to bookworm if needed
+ARG DEBIAN_VERSION="trixie-slim"
 ARG GO_VERSION="1.24-bookworm"
 
 
@@ -34,18 +34,15 @@ RUN rm -f /etc/apt/apt.conf.d/docker-clean \
 
 # Install ffmpeg, tini (for signal handling),
 # and other common tools for the echo source.
-# Enable non-free repository for Intel media drivers
-# mesa-va-drivers for AMD APU
-# libasound2-plugins for ALSA support
+# Try to install Intel drivers, fallback to generic if not available
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked --mount=type=cache,target=/var/lib/apt,sharing=locked \
-    echo 'deb http://deb.debian.org/debian bookworm non-free-firmware' >> /etc/apt/sources.list && \
-    echo 'deb http://deb.debian.org/debian bookworm non-free' >> /etc/apt/sources.list && \
-    apt-get -y update && apt-get -y install --no-install-recommends \
-        ffmpeg tini \
-        python3 curl jq \
-        va-driver-all \
-        mesa-va-drivers \
-        libasound2-plugins && \
+    echo 'deb http://deb.debian.org/debian trixie non-free-firmware' >> /etc/apt/sources.list && \
+    echo 'deb http://deb.debian.org/debian trixie non-free' >> /etc/apt/sources.list && \
+    apt-get -y update && \
+    apt-get -y install --no-install-recommends ffmpeg tini python3 curl jq libasound2-plugins && \
+    (apt-get -y install --no-install-recommends intel-media-va-driver-non-free || \
+     apt-get -y install --no-install-recommends va-driver-all || true) && \
+    (apt-get -y install --no-install-recommends mesa-va-drivers || true) && \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 
 COPY --from=build /build/go2rtc /usr/local/bin/
