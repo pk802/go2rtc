@@ -544,6 +544,26 @@ export class VideoRTC extends HTMLElement {
                         console.warn(er);
                     });
                     break;
+                case 'webrtc/session':
+                    // Store session ID for server-controlled pause/resume
+                    this.sessionID = msg.value;
+                    console.log('🔑 Session ID received:', this.sessionID);
+                    // Trigger event for stream.html to capture session ID
+                    this.dispatchEvent(new CustomEvent('sessionreceived', {detail: {sessionID: this.sessionID}}));
+                    break;
+                case 'webrtc':
+                    // Handle v2 API response which may include session_id
+                    if (msg.value.type === 'answer') {
+                        pc.setRemoteDescription({type: 'answer', sdp: msg.value.sdp}).catch(er => {
+                            console.warn(er);
+                        });
+                        if (msg.value.session_id) {
+                            this.sessionID = msg.value.session_id;
+                            console.log('🔑 Session ID received (v2):', this.sessionID);
+                            this.dispatchEvent(new CustomEvent('sessionreceived', {detail: {sessionID: this.sessionID}}));
+                        }
+                    }
+                    break;
                 case 'error':
                     if (!msg.value.includes('webrtc/offer')) return;
                     pc.close();

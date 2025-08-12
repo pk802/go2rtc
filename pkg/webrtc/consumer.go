@@ -41,6 +41,14 @@ func (c *Conn) AddTrack(media *core.Media, codec *core.Codec, track *core.Receiv
 
 	sender := core.NewSender(media, codec)
 	sender.Handler = func(packet *rtp.Packet) {
+		// Check if this consumer is paused - drop packets to save bandwidth
+		if c.paused.Load() {
+			// Uncomment for debugging: log every 100th dropped packet
+			// if packet.SequenceNumber % 100 == 0 {
+			// 	log.Debug().Uint32("conn", c.ID).Msg("[webrtc] 🚫 PACKET DROPPED (PAUSED)")
+			// }
+			return
+		}
 		c.Send += packet.MarshalSize()
 		//important to send with remote PayloadType
 		_ = localTrack.WriteRTP(payloadType, packet)
