@@ -1,0 +1,77 @@
+version: '3.8'
+
+services:
+  go2rtc:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: pk802/go2rtc:latest
+    container_name: go2rtc
+    restart: unless-stopped
+    ports:
+      - "1984:1984"    # Web UI
+      - "8554:8554"    # RTSP
+    volumes:
+      - ./config:/config
+      - /etc/localtime:/etc/localtime:ro
+    environment:
+      - TZ=UTC
+    networks:
+      - go2rtc
+
+  # Hardware acceleration variant
+  go2rtc-hardware:
+    build:
+      context: .
+      dockerfile: docker/hardware.Dockerfile
+    image: pk802/go2rtc:hardware
+    container_name: go2rtc-hardware
+    restart: unless-stopped
+    ports:
+      - "1985:1984"    # Web UI (different port to avoid conflict)
+      - "8555:8554"    # RTSP (different port to avoid conflict)
+    volumes:
+      - ./config:/config
+      - /etc/localtime:/etc/localtime:ro
+    environment:
+      - TZ=UTC
+    devices:
+      - /dev/dri:/dev/dri  # Intel QSV/VAAPI
+    networks:
+      - go2rtc
+    profiles:
+      - hardware
+
+  # Rockchip variant
+  go2rtc-rockchip:
+    build:
+      context: .
+      dockerfile: docker/rockchip.Dockerfile
+    image: pk802/go2rtc:rockchip
+    container_name: go2rtc-rockchip
+    restart: unless-stopped
+    ports:
+      - "1986:1984"    # Web UI (different port to avoid conflict)
+      - "8556:8554"    # RTSP (different port to avoid conflict)
+    volumes:
+      - ./config:/config
+      - /etc/localtime:/etc/localtime:ro
+    environment:
+      - TZ=UTC
+    devices:
+      - /dev/dri:/dev/dri
+      - /dev/dma_heap:/dev/dma_heap
+      - /dev/rga:/dev/rga
+      - /dev/mpp_service:/dev/mpp_service
+    networks:
+      - go2rtc
+    profiles:
+      - rockchip
+
+networks:
+  go2rtc:
+    driver: bridge
+
+volumes:
+  config:
+    driver: local
