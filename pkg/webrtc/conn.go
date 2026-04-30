@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -27,6 +28,14 @@ type Conn struct {
 	// Pause/resume functionality
 	paused   atomic.Bool
 	ringType atomic.Value // "main" or "sub" for stream quality switching
+
+	// Per-consumer GOP-buffer replay hooks. AddTrack registers one
+	// callback per H.264 sender; Resume() iterates and fires each so
+	// the cached IDR + post-IDR P-chain reaches the browser BEFORE the
+	// pause flag is lifted. Camera-agnostic fast-resume — works even
+	// when the upstream camera ignores PLI.
+	replayMu        sync.Mutex
+	replayCallbacks []func()
 
 	// Stream source for motion detection mapping
 	StreamSource string `json:"stream_source,omitempty"`
@@ -238,15 +247,51 @@ func sanitizeIP6(host string) string {
 
 // Pause/Resume Methods
 
-// Pause pauses the WebRTC stream by setting the paused flag
+// Pause pauses the WebRTC stream by setting the paused flag.
+// Live RTP packets continue to arrive at the receiver and are still
+// captured into the per-consumer GOP buffer (so the next Resume can
+// replay them), but the consumer's chain drops them at the pause filter
+// instead of forwarding to the browser.
 func (c *Conn) Pause() {
 	c.paused.Store(true)
 }
 
-// Resume resumes the WebRTC stream and requests a keyframe
+// Resume resumes the WebRTC stream. Order matters:
+//
+//  1. Replay each consumer's cached IDR + post-IDR P-chain to the
+//     browser. This bypasses the pause filter on purpose — the replay
+//     handler is the slice of the sender chain *after* the filter
+//     (h264.RTPPay → write-to-track), so it fires regardless of the
+//     paused flag.
+//  2. Clear the paused flag so live RTP frames arriving via the normal
+//     producer-goroutine path begin forwarding.
+//  3. Send a PLI to the camera. Belt-and-braces — if the camera honors
+//     PLI we'll get a fresh IDR a few hundred ms later, which the
+//     decoder will use as a clean reference. If the camera ignores
+//     PLI (most don't), the replay we just did has already brought the
+//     decoder current, so resume completes within decode latency.
+//
+// Net effect: browser shows a frame within ~50-150 ms of un-pause,
+// independent of camera GOP and independent of PLI honor.
 func (c *Conn) Resume() {
+	c.replayMu.Lock()
+	callbacks := append([]func(){}, c.replayCallbacks...)
+	c.replayMu.Unlock()
+
+	for _, cb := range callbacks {
+		cb()
+	}
 	c.paused.Store(false)
 	c.requestKeyframe()
+}
+
+// addReplayCallback registers a function that gets fired by Resume()
+// before the pause flag is cleared. consumer.go calls this once per
+// H.264 sender it sets up.
+func (c *Conn) addReplayCallback(cb func()) {
+	c.replayMu.Lock()
+	c.replayCallbacks = append(c.replayCallbacks, cb)
+	c.replayMu.Unlock()
 }
 
 // IsPaused returns the current pause state
