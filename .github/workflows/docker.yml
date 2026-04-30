@@ -2,10 +2,11 @@ name: Build and Push Docker Image
 
 on:
   push:
-    branches: [ master ]
+    branches: [ master, fast-resume-gop-buffer ]
     tags: [ 'v*' ]
   pull_request:
     branches: [ master ]
+  workflow_dispatch: {}
 
 env:
   REGISTRY: ghcr.io
