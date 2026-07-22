@@ -1,22 +1,31 @@
 package webrtc
 
 import (
+	"encoding/binary"
 	"sync"
 
+	"github.com/AlexxIT/go2rtc/pkg/h264"
 	"github.com/pion/rtp"
 )
 
-// gopBuffer caches the most recent decodable H.264 chain (latest IDR,
-// any SPS/PPS that arrived, and every P-frame since that IDR). On
+// gopBuffer caches the most recent decodable H.264 access units (the
+// latest IDR access unit and every P-frame access unit since it). On
 // resume, [replay] re-emits the cached chain through a downstream
 // handler so the browser's decoder is brought up to a "live now" state
 // without waiting for the camera's next scheduled keyframe.
 //
-// One buffer per consumer (per Sender). It captures NAL units AFTER
-// h264.RTPDepay has reassembled them, so each entry is exactly one
-// whole NAL — payload[0] holds the H.264 NAL header byte; the low 5
-// bits are the NAL type (1 = non-IDR slice, 5 = IDR, 7 = SPS, 8 = PPS,
-// 6 = SEI, 9 = AUD).
+// One buffer per consumer (per Sender). It captures packets AFTER
+// h264.RTPDepay, which emits **AVCC** access units: one packet =
+// one access unit = one or more length-prefixed NALs
+// ([4-byte big-endian length][NAL header][NAL data]…). The NAL type is
+// therefore at byte offset 4 (payload[4]&0x1F), NOT payload[0] — reading
+// payload[0] gets the first length byte (see #406: doing so cached
+// nothing and made fast-resume a silent no-op fleet-wide).
+//
+// We only track whole access units. RTPDepay already prepends SPS/PPS
+// (from the camera or the FmtpLine parameter sets) in front of every IDR
+// access unit, so a cached IDR packet is self-contained and decodable on
+// its own — no separate SPS/PPS bookkeeping is needed.
 //
 // Memory: bounded by the GOP. For a 4 Mbps stream with 8s GOP that's
 // ~4 MB; for 512 kbps sub-streams ~512 KB. No upper cap on P-frame
@@ -25,69 +34,67 @@ import (
 // fixed schedule, so the buffer drains every GOP cycle.
 type gopBuffer struct {
 	mu      sync.Mutex
-	sps     *rtp.Packet // latest SPS, kept across IDRs
-	pps     *rtp.Packet // latest PPS, kept across IDRs
-	idr     *rtp.Packet // most recent IDR; cleared when a new one arrives
+	idr     *rtp.Packet // latest IDR access unit (self-contained: SPS+PPS+IDR)
 	pframes []*rtp.Packet
 }
 
-// capture inspects an H.264 NAL unit and updates the buffer. Always safe
-// to call regardless of pause state — the buffer is the source of truth
-// for "what would the decoder need to bootstrap."
+// capture inspects one AVCC access-unit packet and updates the buffer.
+// Always safe to call regardless of pause state — the buffer is the
+// source of truth for "what would the decoder need to bootstrap."
 //
-// On a new IDR (NAL type 5) the post-IDR P-frame chain is reset — the
-// previous chain is no longer reachable from the new reference frame.
-// SPS (7) and PPS (8) are kept "stickily" because the decoder needs
-// them in front of any IDR to interpret it; cameras usually emit them
-// alongside every IDR but not always.
+// The packet may bundle several NALs (e.g. SPS+PPS+IDR for a keyframe
+// access unit). We scan the NAL types in-place (no allocation) to
+// classify the whole access unit:
+//   - contains an IDR (type 5) → new GOP: replace idr, drop the P-chain.
+//   - otherwise contains a P-frame (type 1) → append to the P-chain,
+//     but only once we have an IDR to anchor it.
+//
+// Parameter-set-only units (SPS/PPS/SEI/AUD with no slice) are ignored:
+// they're already folded into the next IDR access unit by RTPDepay.
 func (b *gopBuffer) capture(packet *rtp.Packet) {
-	if len(packet.Payload) == 0 {
-		return
+	p := packet.Payload
+	hasIDR, hasP := false, false
+	// Walk the length-prefixed NALs. Each NAL: [4-byte length][payload].
+	for off := 0; off+5 <= len(p); {
+		size := int(binary.BigEndian.Uint32(p[off:]))
+		switch p[off+4] & 0x1F {
+		case h264.NALUTypeIFrame:
+			hasIDR = true
+		case h264.NALUTypePFrame:
+			hasP = true
+		}
+		if size <= 0 {
+			break // malformed length — stop scanning
+		}
+		off += 4 + size
 	}
-	nalType := packet.Payload[0] & 0x1F
 
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	switch nalType {
-	case 5: // IDR slice — start of a new GOP
+	switch {
+	case hasIDR:
 		b.idr = clonePacket(packet)
 		b.pframes = b.pframes[:0]
-	case 7: // SPS
-		b.sps = clonePacket(packet)
-	case 8: // PPS
-		b.pps = clonePacket(packet)
-	case 1: // Non-IDR slice (P-frame, B-frame)
-		// Only buffer P-frames that follow a known IDR. Without an
-		// IDR in front, the chain is undecodable so there's no point
-		// caching.
-		if b.idr != nil {
-			b.pframes = append(b.pframes, clonePacket(packet))
-		}
+	case hasP && b.idr != nil:
+		b.pframes = append(b.pframes, clonePacket(packet))
 	}
-	// Other NAL types (6 = SEI, 9 = AUD, 24+ = aggregation/fragmentation
-	// formats that depay has already unwrapped) are ignored. SEI is
-	// optional metadata; AUD is an access unit delimiter the decoder
-	// derives implicitly; aggregations don't reach this layer.
 }
 
-// replay sends the cached chain through the supplied handler in
-// decoder-friendly order: SPS → PPS → IDR → P-frames. The handler is
-// the rest of the consumer chain *after* the buffer-capture stage,
-// i.e. h264.RTPPay → inner write-to-track. This bypasses the pause
-// filter on purpose — replay is the one path that should fire even
-// while the connection is still flagged paused (the caller flips the
-// flag right after replay completes).
+// replay re-emits the cached access units in order (IDR → P-frames)
+// through the supplied handler. The handler is the rest of the consumer
+// chain *after* the buffer-capture stage, i.e. h264.RTPPay → inner
+// write-to-track. This bypasses the pause filter on purpose — replay is
+// the one path that should fire even while the connection is still
+// flagged paused (the caller flips the flag right after replay completes).
 //
-// Returns the number of NALs replayed; 0 if the buffer hasn't seen an
-// IDR yet (no decodable starting point).
+// Returns the number of access units replayed; 0 if the buffer hasn't
+// seen an IDR yet (no decodable starting point).
 func (b *gopBuffer) replay(handler func(*rtp.Packet)) int {
 	b.mu.Lock()
 	// Snapshot the current state so we can release the lock before
 	// firing the handler (which may take real time to fragment + write
 	// to the network track).
-	sps := b.sps
-	pps := b.pps
 	idr := b.idr
 	pframes := append([]*rtp.Packet(nil), b.pframes...)
 	b.mu.Unlock()
@@ -96,17 +103,8 @@ func (b *gopBuffer) replay(handler func(*rtp.Packet)) int {
 		return 0
 	}
 
-	count := 0
-	if sps != nil {
-		handler(sps)
-		count++
-	}
-	if pps != nil {
-		handler(pps)
-		count++
-	}
+	count := 1
 	handler(idr)
-	count++
 	for _, p := range pframes {
 		handler(p)
 		count++
@@ -119,8 +117,6 @@ func (b *gopBuffer) replay(handler func(*rtp.Packet)) int {
 // session.
 func (b *gopBuffer) reset() {
 	b.mu.Lock()
-	b.sps = nil
-	b.pps = nil
 	b.idr = nil
 	b.pframes = b.pframes[:0]
 	b.mu.Unlock()
