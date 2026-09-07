@@ -4,18 +4,19 @@ import (
 	"encoding/binary"
 	"sync"
 
+	"github.com/AlexxIT/go2rtc/pkg/core"
 	"github.com/AlexxIT/go2rtc/pkg/h264"
 	"github.com/pion/rtp"
 )
 
-// gopBuffer caches the most recent decodable H.264 access units (the
+// gopBuffer caches the most recent decodable H.264 / H.265 access units (the
 // latest IDR access unit and every P-frame access unit since it). On
 // resume, [replay] re-emits the cached chain through a downstream
 // handler so the browser's decoder is brought up to a "live now" state
 // without waiting for the camera's next scheduled keyframe.
 //
 // One buffer per consumer (per Sender). It captures packets AFTER
-// h264.RTPDepay, which emits **AVCC** access units: one packet =
+// h264.RTPDepay / h265.RTPDepay, which emit **AVCC** access units: one packet =
 // one access unit = one or more length-prefixed NALs
 // ([4-byte big-endian length][NAL header][NAL data]…). The NAL type is
 // therefore at byte offset 4 (payload[4]&0x1F), NOT payload[0] — reading
@@ -36,6 +37,34 @@ type gopBuffer struct {
 	mu      sync.Mutex
 	idr     *rtp.Packet // latest IDR access unit (self-contained: SPS+PPS+IDR)
 	pframes []*rtp.Packet
+	// codec is core.CodecH264 or core.CodecH265: the two carry the NAL type in
+	// different bits of the header byte, and the keyframe / inter-frame types
+	// differ (#1565 — H.265 had no buffer at all, so a resume started mid-GOP
+	// and Chrome's HEVC hardware decoder, which has no software fallback,
+	// never recovered: 14 of 24 resumes stayed black on E000201's Securus
+	// cameras while H.264 on E000015 replayed cleanly 24 of 24).
+	codec string
+}
+
+// classify reports whether a NAL header byte names a keyframe slice or an
+// inter (P/B) slice for this buffer's codec.
+//
+//	H.264: type = b & 0x1F — 5 = IDR, 1 = non-IDR slice.
+//	H.265: type = (b >> 1) & 0x3F — 16..21 = BLA/IDR/CRA (random access
+//	       points, decodable on their own), 0..9 = TRAIL/TSA/STSA/RADL/RASL
+//	       (inter slices that need the picture before them).
+func (b *gopBuffer) classify(hdr byte) (key, inter bool) {
+	if b.codec == core.CodecH265 {
+		t := (hdr >> 1) & 0x3F
+		return t >= 16 && t <= 21, t <= 9
+	}
+	switch hdr & 0x1F {
+	case h264.NALUTypeIFrame:
+		return true, false
+	case h264.NALUTypePFrame:
+		return false, true
+	}
+	return false, false
 }
 
 // capture inspects one AVCC access-unit packet and updates the buffer.
@@ -45,8 +74,8 @@ type gopBuffer struct {
 // The packet may bundle several NALs (e.g. SPS+PPS+IDR for a keyframe
 // access unit). We scan the NAL types in-place (no allocation) to
 // classify the whole access unit:
-//   - contains an IDR (type 5) → new GOP: replace idr, drop the P-chain.
-//   - otherwise contains a P-frame (type 1) → append to the P-chain,
+//   - contains a keyframe slice (see classify) → new GOP: replace idr, drop the P-chain.
+//   - otherwise contains an inter slice → append to the P-chain,
 //     but only once we have an IDR to anchor it.
 //
 // Parameter-set-only units (SPS/PPS/SEI/AUD with no slice) are ignored:
@@ -57,10 +86,9 @@ func (b *gopBuffer) capture(packet *rtp.Packet) {
 	// Walk the length-prefixed NALs. Each NAL: [4-byte length][payload].
 	for off := 0; off+5 <= len(p); {
 		size := int(binary.BigEndian.Uint32(p[off:]))
-		switch p[off+4] & 0x1F {
-		case h264.NALUTypeIFrame:
+		if key, inter := b.classify(p[off+4]); key {
 			hasIDR = true
-		case h264.NALUTypePFrame:
+		} else if inter {
 			hasP = true
 		}
 		if size <= 0 {

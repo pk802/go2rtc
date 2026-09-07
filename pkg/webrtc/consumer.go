@@ -53,9 +53,9 @@ func (c *Conn) AddTrack(media *core.Media, codec *core.Codec, track *core.Receiv
 	}
 
 	// True when the codec-specific switch case below builds its own
-	// pause filter (currently only H.264 — its filter doubles as the
-	// GOP-buffer capture point). For all other codecs we add a generic
-	// pause filter as the last wrap below.
+	// pause filter (H.264 and H.265 — the filter doubles as the GOP-buffer
+	// capture point). For all other codecs we add a generic pause filter
+	// as the last wrap below.
 	pauseFilterApplied := false
 
 	switch track.Codec.Name {
@@ -75,7 +75,7 @@ func (c *Conn) AddTrack(media *core.Media, codec *core.Codec, track *core.Receiv
 		// pause filter, so replay always reaches the browser.
 		replayHandler := sender.Handler
 
-		gop := &gopBuffer{}
+		gop := &gopBuffer{codec: core.CodecH264}
 		c.addReplayCallback(func() {
 			gop.replay(replayHandler)
 		})
@@ -99,7 +99,28 @@ func (c *Conn) AddTrack(media *core.Media, codec *core.Codec, track *core.Receiv
 		}
 
 	case core.CodecH265:
+		// Same chain as H.264 (#1565): write-to-track → RTPPay →
+		// capture+pause-filter → RTPDepay. Without the buffer a resume
+		// started mid-GOP; the browser's HEVC decoder is hardware-only and,
+		// measured on Chrome 152 / macOS, does not recover from that — the
+		// tile stayed black for good while bytes kept arriving.
 		sender.Handler = h265.RTPPay(1200, sender.Handler)
+		replayHandler := sender.Handler
+
+		gop := &gopBuffer{codec: core.CodecH265}
+		c.addReplayCallback(func() {
+			gop.replay(replayHandler)
+		})
+
+		sender.Handler = func(packet *rtp.Packet) {
+			gop.capture(packet)
+			if c.paused.Load() {
+				return
+			}
+			replayHandler(packet)
+		}
+		pauseFilterApplied = true
+
 		if track.Codec.IsRTP() {
 			sender.Handler = h265.RTPDepay(track.Codec, sender.Handler)
 		} else {
