@@ -7,6 +7,7 @@ import (
 	"github.com/AlexxIT/go2rtc/internal/api"
 	"github.com/AlexxIT/go2rtc/internal/api/ws"
 	"github.com/AlexxIT/go2rtc/internal/app"
+	"github.com/AlexxIT/go2rtc/internal/pprof"
 
 	"github.com/AlexxIT/go2rtc/internal/bubble"
 	"github.com/AlexxIT/go2rtc/internal/debug"
@@ -61,9 +62,10 @@ func main() {
 	}
 
 	modules := []module{
-		{"", app.Init},    // init config and logs
-		{"api", api.Init}, // init API before all others
-		{"ws", ws.Init},   // init WS API endpoint
+		{"", app.Init},        // init config and logs
+		{"api", api.Init},     // init API before all others
+		{"pprof", pprof.Init}, // runtime profiler on the API (#1568)
+		{"ws", ws.Init},       // init WS API endpoint
 		{"", streams.Init},
 		// Main sources and servers
 		{"http", http.Init},     // rtsp source, HTTP server
