@@ -121,6 +121,7 @@ func Init() {
 	// Register session-based pause/resume endpoints
 	api.HandleFunc("api/webrtc/session/pause", sessionPauseHTTPHandler)
 	api.HandleFunc("api/webrtc/session/resume", sessionResumeHTTPHandler)
+	api.HandleFunc("api/webrtc/session/close", sessionCloseHTTPHandler)
 	api.HandleFunc("api/webrtc/sessions", listSessionsHTTPHandler)
 
 	// WebRTC client
@@ -712,6 +713,64 @@ func sessionResumeHTTPHandler(w http.ResponseWriter, r *http.Request) {
 		"session_id": reqBody.SessionID,
 	}
 	
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
+}
+
+// sessionCloseHTTPHandler closes a session by id — the gateway's way of saying
+// "this viewer is gone" the moment its own PeerConnection with the viewer
+// reports Failed/Closed (#1568 / #1569). Without it a dead viewer's session
+// lived on until ICE consent expired (~30 s each), and a wall that pinned 131
+// cameras left 131 PeerConnections and GOP buffers behind.
+//
+// IDEMPOTENT AND NON-FATAL BY CONTRACT: the caller fires unconditionally for
+// every sid it ever negotiated, including ones go2rtc already reaped, so an
+// unknown sid answers 200 with `closed:false` — it is not an error condition,
+// exactly as releasing a talk lock nobody holds frees nothing. Only a
+// malformed body is a 400. Closing goes through conn.Close() → pion Close →
+// the PeerConnectionStateClosed cleanup registered at negotiation, so the
+// session leaves sessionConnections/activeConnections by the same path a
+// natural close uses. A PAUSED session of a live viewer is never touched:
+// the caller invokes this only from its Failed/Closed path.
+func sessionCloseHTTPHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method == "OPTIONS" {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	var reqBody struct {
+		SessionID string `json:"session_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&reqBody); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+	if reqBody.SessionID == "" {
+		http.Error(w, "session_id is required", http.StatusBadRequest)
+		return
+	}
+
+	sessionMutex.RLock()
+	conn, exists := sessionConnections[reqBody.SessionID]
+	sessionMutex.RUnlock()
+
+	closed := false
+	if exists {
+		if err := conn.Close(); err == nil {
+			closed = true
+		}
+		log.Info().Str("session", reqBody.SessionID).Bool("closed", closed).Msg("[webrtc] Session closed by request")
+	}
+
+	response := map[string]interface{}{
+		"success":    true,
+		"action":     "close",
+		"session_id": reqBody.SessionID,
+		"closed":     closed,
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)
 }

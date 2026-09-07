@@ -29,10 +29,17 @@ import (
 // its own — no separate SPS/PPS bookkeeping is needed.
 //
 // Memory: bounded by the GOP. For a 4 Mbps stream with 8s GOP that's
-// ~4 MB; for 512 kbps sub-streams ~512 KB. No upper cap on P-frame
-// count — if a producer goes berserk and never sends another IDR, the
-// buffer would grow without bound. In practice cameras emit IDRs on a
-// fixed schedule, so the buffer drains every GOP cycle.
+// ~4 MB; for 512 kbps sub-streams ~512 KB. The P-chain is capped at
+// [maxChain] access units (#1568): a producer that stops emitting IDRs —
+// exactly the misbehaving camera whose memory you least want to keep —
+// used to grow it without bound. Past the cap the whole buffer is dropped
+// (a chain that long is not a replayable GOP anyway) and it re-anchors on
+// the next IDR.
+// maxChain — inter-frame access units kept after an IDR before the buffer
+// gives up on this GOP: 30 s at 10 fps, 12 s at 25 fps. Every camera in the
+// fleet keyframes well inside that (the Securus sub-streams every 1 s).
+const maxChain = 300
+
 type gopBuffer struct {
 	mu      sync.Mutex
 	idr     *rtp.Packet // latest IDR access unit (self-contained: SPS+PPS+IDR)
@@ -105,6 +112,11 @@ func (b *gopBuffer) capture(packet *rtp.Packet) {
 		b.idr = clonePacket(packet)
 		b.pframes = b.pframes[:0]
 	case hasP && b.idr != nil:
+		if len(b.pframes) >= maxChain {
+			b.idr = nil
+			b.pframes = b.pframes[:0]
+			return
+		}
 		b.pframes = append(b.pframes, clonePacket(packet))
 	}
 }

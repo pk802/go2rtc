@@ -65,3 +65,22 @@ func TestGopBufferH264Unchanged(t *testing.T) {
 		t.Fatal("default codec must classify as H.264")
 	}
 }
+
+// #1568: a producer that never sends another IDR must not grow the chain
+// without bound — past maxChain the buffer drops the GOP and waits for the
+// next keyframe.
+func TestGopBufferChainIsBounded(t *testing.T) {
+	b := &gopBuffer{codec: core.CodecH264}
+	b.capture(au(0x65))
+	for i := 0; i < maxChain+5; i++ {
+		b.capture(au(0x41))
+	}
+	if got := replayed(b); got != 0 {
+		t.Fatalf("after %d inter frames without an IDR the buffer must be empty, replayed %d", maxChain+5, got)
+	}
+	b.capture(au(0x65)) // re-anchors
+	b.capture(au(0x41))
+	if got := replayed(b); got != 2 {
+		t.Fatalf("re-anchored on the next IDR: want 2 units, got %d", got)
+	}
+}
