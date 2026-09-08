@@ -7,6 +7,11 @@ on:
       - 'master'
     tags:
       - 'v*'
+    # A change to the CI files alone is not a build (Tracker#1570): this
+    # workflow also publishes the `master` image, and a rebuild moves that
+    # tag to a new digest of the same code.
+    paths-ignore:
+      - '.github/workflows/**'
 
 jobs:
   build-binaries:
