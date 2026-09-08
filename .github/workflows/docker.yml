@@ -4,6 +4,11 @@ on:
   push:
     branches: [ master, fast-resume-gop-buffer ]
     tags: [ 'v*' ]
+    # A change to the CI files alone is not a build: a rebuild moves the
+    # branch tag to a new digest of the same code (Tracker#1570).
+    paths-ignore:
+      - '.github/workflows/retag.yml'
+      - '.github/workflows/docker.yml'
   pull_request:
     branches: [ master ]
   workflow_dispatch: {}
@@ -45,6 +50,9 @@ jobs:
           type=semver,pattern={{version}}
           type=semver,pattern={{major}}.{{minor}}
           type=raw,value=latest,enable={{is_default_branch}}
+          # Immutable per-build name (Tracker#1570): the branch tag above moves
+          # on every build; the fleet template names THIS one.
+          type=sha,format=short,prefix=
 
     - name: Build and push Docker image
       uses: docker/build-push-action@v5
@@ -90,6 +98,7 @@ jobs:
           type=semver,pattern={{version}},suffix=-hardware
           type=semver,pattern={{major}}.{{minor}},suffix=-hardware
           type=raw,value=hardware,enable={{is_default_branch}}
+          type=sha,format=short,prefix=,suffix=-hardware
 
     - name: Build and push Hardware Docker image
       uses: docker/build-push-action@v5
@@ -135,6 +144,7 @@ jobs:
           type=semver,pattern={{version}},suffix=-rockchip
           type=semver,pattern={{major}}.{{minor}},suffix=-rockchip
           type=raw,value=rockchip,enable={{is_default_branch}}
+          type=sha,format=short,prefix=,suffix=-rockchip
 
     - name: Build and push Rockchip Docker image
       uses: docker/build-push-action@v5

@@ -1,0 +1,75 @@
+# Publish an IMMUTABLE tag for a manifest that already exists in GHCR — by
+# retagging, never by rebuilding (a rebuild is a different digest and the
+# record would lie). Used to name a verified build for the fleet template
+# (pk802/Modernext-Tracker#1570): the template names `ghcr.io/pk802/go2rtc:<sha>`,
+# a digest with a readable name, so a box preloaded from the LAN tar (whose
+# `docker load` yields no RepoDigests) still matches by tag.
+#
+# Refuses to move a tag that already exists and points elsewhere: GHCR has no
+# tag-immutability switch, so immutability is this job's refusal.
+name: Retag a verified manifest
+
+on:
+  workflow_dispatch:
+    inputs:
+      digest:
+        description: 'Manifest digest to name, e.g. sha256:6704131f…'
+        required: true
+        type: string
+      tag:
+        description: 'Immutable tag to publish, e.g. 406d054 (the fork commit)'
+        required: true
+        type: string
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  retag:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Refuse to move an existing tag
+        env:
+          TAG: ${{ inputs.tag }}
+          DIGEST: ${{ inputs.digest }}
+        run: |
+          set -eu
+          if existing=$(docker buildx imagetools inspect "$IMAGE:$TAG" --format '{{.Manifest.Digest}}' 2>/dev/null); then
+            if [ "$existing" = "$DIGEST" ]; then
+              echo "tag $TAG already resolves to $DIGEST — nothing to do"
+              echo "noop=true" >> "$GITHUB_ENV"
+            else
+              echo "::error::tag $TAG already exists and resolves to $existing, not $DIGEST — tags here are immutable; pick a new name"
+              exit 1
+            fi
+          fi
+
+      - name: Retag (no rebuild)
+        if: env.noop != 'true'
+        env:
+          TAG: ${{ inputs.tag }}
+          DIGEST: ${{ inputs.digest }}
+        run: docker buildx imagetools create -t "$IMAGE:$TAG" "$IMAGE@$DIGEST"
+
+      - name: Prove the tag resolves to the digest
+        env:
+          TAG: ${{ inputs.tag }}
+          DIGEST: ${{ inputs.digest }}
+        run: |
+          set -eu
+          got=$(docker buildx imagetools inspect "$IMAGE:$TAG" --format '{{.Manifest.Digest}}')
+          echo "$IMAGE:$TAG -> $got"
+          [ "$got" = "$DIGEST" ] || { echo "::error::tag resolves to $got, expected $DIGEST"; exit 1; }
