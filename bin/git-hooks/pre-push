@@ -1,0 +1,186 @@
+#!/bin/sh
+# =============================================================================
+#  Modernext pre-push guard — WHAT AM I ABOUT TO PUBLISH?  (Tracker#1775)
+#
+#  ⛔ THE CANONICAL IS  modernext_documentation/ops/git-hooks/pre-push  — THAT PATH,
+#  not "this file". If what you are reading is at any other path (bin/git-hooks/ in
+#  any of the seven trees), it is a DISTRIBUTED COPY: edit the canonical and re-run
+#  ops/git-hooks/install.sh (Tracker#1011). Check your own path before editing.
+#
+#  ⚠️ This wording is deliberate and was paid for. It used to read "do not edit an
+#  installed copy — edit this one", which is correct in the canonical and MISLEADING
+#  in the seven copies that carry the identical header: "this one" reads as the file
+#  in front of you, and seven times out of eight that file is an installed copy.
+#  Measured 2026-09-11 — cleanup edited bin/git-hooks/pre-push believing it canonical
+#  and said so in the commit message; ops caught it only by comparing md5s before
+#  distributing. Had they not, the installer would have SILENTLY REVERTED the fix and
+#  --check would then have reported a clean fleet. The drift the distributor exists to
+#  prevent, arriving through the distributor.
+#  ⇒ A pointer that says "this one" cannot survive being copied. Name the path.
+#
+#  ---- THE DEFECT ------------------------------------------------------------
+#  `git push` PUBLISHES EVERY ANCESTOR, not just your commit. In a shared
+#  checkout a peer who has COMMITTED but not pushed sits beneath you, and your
+#  push publishes their work under your action. Measured 2026-09-11: vms-local's
+#  push reported "failed to push some refs" WHILE THEIR COMMIT WAS ON THE
+#  REMOTE, because server's earlier push had already carried vms-local's
+#  committed-but-unpushed 8481330 along with it. Not a race — a peer published
+#  their commit first, without either of them intending it or noticing.
+#
+#  ---- WHY THIS WARNS AND NEVER BLOCKS ---------------------------------------
+#  ⛔ When a peer's commit is beneath yours, publishing it is REQUIRED for yours
+#  to land — git cannot publish a commit without its parents. Blocking would
+#  stop correct work over a condition the pusher cannot fix.
+#  ⇒ THE DEFECT IS DOING IT INVISIBLY, NOT DOING IT. So: print, never refuse.
+#
+#  ---- TWO THINGS THIS IS NOT ------------------------------------------------
+#  ⚠️ A CONTENT PROBE AT THE DESTINATION CANNOT SEE THIS. `git show
+#  origin/main:path | grep` asks "did MY change land" and is silent on "whose
+#  work did I publish alongside it" — it would have shown green through that
+#  entire incident. Two questions, two checks: ancestry BEFORE, content AFTER.
+#
+#  ⛔ AND `git push origin <sha>:refs/heads/<br>` IS NOT A FIX EITHER. Pushing a
+#  sha bounds which TIP you publish; every ancestor still goes. Naming an object
+#  removes a race only where that object's identity is the whole of what you
+#  publish — when publishing X implies publishing X's dependencies, naming X
+#  bounds nothing beneath it.
+#
+#  ---- ATTRIBUTION -----------------------------------------------------------
+#  ⚠️ By the `Lane:` trailer (Tracker#1785), NOT by author. A commit without one
+#  is listed as "unattributed" — never assumed to be the pusher's.
+#  ⭐ On the server Laravel tree that is the ONLY discriminator that exists:
+#  `git log --format=%an -60` there returns 59 `modernext-server` + 1 `PK`, so
+#  every lane commits under one identity and an author-based audit cannot be run
+#  at all — not even retrospectively. The trailer is load-bearing there, not
+#  decorative. Anyone tempted to strip it as cosmetic should read this line.
+# =============================================================================
+
+remote="$1"
+[ -n "$remote" ] || remote=origin
+
+ZERO=0000000000000000000000000000000000000000
+
+# git feeds "<local ref> <local sha> <remote ref> <remote sha>" per ref on stdin.
+while read -r local_ref local_sha remote_ref remote_sha; do
+    # a deletion, or nothing to send
+    case "$local_sha" in
+        "$ZERO"|'') continue ;;
+    esac
+
+    if [ "$remote_sha" = "$ZERO" ]; then
+        # ⛔ NEW BRANCH — and this is where the obvious range is WRONG.
+        # `range=$local_sha` means "every commit reachable from the tip", i.e.
+        # the WHOLE HISTORY: measured 2026-09-11 on the docs repo, 1070 commits
+        # where the number actually being added to the remote was 0.
+        # ⇒ Two failures, and the second is worse than the first:
+        #     - it iterates the entire history (~20 s here), and
+        #     - it reports hundreds of "foreign" commits that are already on the
+        #       remote, which is an alarm that is wrong every time it fires.
+        # A probe that over-reports is WRONG, not cautious — being wrong loudly
+        # costs more than being wrong quietly, because people act on it, and an
+        # alarm that cries wolf is how a real one gets waved through.
+        # `--not --remotes` bounds it to what this push genuinely adds.
+        set -- "$local_sha" --not --remotes
+        rangedesc="new branch ${remote_ref#refs/heads/}"
+    else
+        set -- "${remote_sha}..${local_sha}"
+        rangedesc="${remote_sha%"${remote_sha#???????}"}..${local_sha%"${local_sha#???????}"}"
+    fi
+
+    total=$(git rev-list --count "$@" 2>/dev/null) || continue
+    [ "${total:-0}" -gt 0 ] || continue
+
+    # The dominant lane = the lane of the tip commit, which is the one pushing.
+    tip_lane=$(git log -1 --format='%(trailers:key=Lane,valueonly,separator=%x2C)' "$local_sha" \
+               | tr -d '[:space:]')
+
+    # ⛔⛔ IS THE TIP'S ATTRIBUTION EVEN TRUSTWORTHY? Two shapes make it not, and BOTH
+    # produce a confident-looking answer, which is why this is checked rather than assumed.
+    # Measured 2026-09-11 in a scratch repo, reproducing ops's report:
+    #
+    #   Lane: ops                     git reports ONLY `server` — `Lane: ops` sits before a
+    #                                 blank line, outside the final trailer block. The hook
+    #   Co-Authored-By: X             then announces "you are Lane: server" and flags every
+    #   Lane: server                  genuine ancestor as foreign. SILENT MISATTRIBUTION.
+    #
+    #   Lane: ops                     git reports `ops,server` — one value with a comma, which
+    #   Lane: server                  matches no lane, so EVERY commit in the range prints as
+    #                                 foreign. The alarm-wrong-every-time failure.
+    #
+    # ⇒ commit-msg (#1785) now prevents both at source. This DETECTS them anyway, because
+    # prevention without detection is how an invariant dies quietly: a commit made with
+    # --no-verify, or one predating the gate, still reaches this hook.
+    #
+    # The test is cheap and catches both: the number of literal `Lane:` lines must equal the
+    # number of values git's trailer parser returns. Shape 1 fails it (2 vs 1); shape 2 passes
+    # the count and is caught by the comma.
+    # ⚠️ `[Ll]ane:` and not `Lane:` — measured 2026-09-11: git's trailer key matching
+    # is CASE-INSENSITIVE (a message with `lane: ops` yields `ops` from
+    # `key=Lane`), and commit-msg accepts the lowercase form too. A case-sensitive
+    # count therefore reads 0 literal against 1 parsed on a perfectly valid commit
+    # and SKIPS attribution on it. ⇒ A counter that is stricter than the parser it
+    # is compared against manufactures its own mismatch — the two sides of a
+    # consistency check must accept exactly the same inputs.
+    tip_literal=$(git log -1 --format=%B "$local_sha" | grep -c '^[Ll]ane:') || tip_literal=0
+    # ⛔ `printf '%s\n'` and NOT `printf '%s'` — with an empty `tip_lane` the
+    # bare form emits NOTHING, awk reads ZERO RECORDS, the action never runs and
+    # this is set to "" instead of "0". The comparison below then reads
+    # `[ "0" = "" ]` -> false -> tip_ok=no, so EVERY commit with no Lane trailer
+    # was declared untrustworthy and attribution was skipped on it.
+    # ⚠️ Found 2026-09-11 installing into Modernext-SOC-Gateway — the first repo
+    # whose tip predates the Lane convention. Every repo tested before it had a
+    # trailer at the tip because we had just committed to it: the test population
+    # was biased by our own recent work, so the no-trailer case never ran.
+    tip_values=$(printf '%s\n' "$tip_lane" | awk -F, '{print ($0=="" ? 0 : NF)}')
+    tip_ok=yes
+    case "$tip_lane" in *,*) tip_ok=no ;; esac
+    [ "$tip_literal" = "$tip_values" ] || tip_ok=no
+
+    # ⭐ ONE process for the whole range, not two per commit. The per-commit form
+    # cost 5.95 s per 300 commits measured; this is ~0.02 s and does not grow
+    # with a lane's backlog. Fields are \037-separated because a subject can
+    # contain anything else.
+    foreign=$(git log --format='%H%x1f%(trailers:key=Lane,valueonly,separator=%x2C)%x1f%s' "$@" 2>/dev/null \
+      | awk -F '\037' -v tip="$tip_lane" '
+          { lane = $2; gsub(/[ \t\r\n]/, "", lane)
+            if (lane == "")                      printf "%s [no Lane: trailer] %s\n", $1, $3
+            else if (tip != "" && lane != tip)   printf "%s [Lane: %s] %s\n", $1, lane, $3
+          }')
+
+    if [ "$tip_ok" = no ]; then
+        # ⛔ Attribution is unreliable, so DO NOT compare — a comparison against a wrong or
+        # ambiguous tip prints every ancestor as foreign, and an alarm that is wrong every time
+        # it fires is how a real one gets waved through. The count is still the primary value
+        # of this hook and is still reported.
+        echo "" >&2
+        echo "⚠️  PUSHING ${total} commit(s) in ${rangedesc} — lane attribution SKIPPED." >&2
+        echo "    Your tip commit's Lane: attribution is not trustworthy:" >&2
+        echo "      ${tip_literal} literal 'Lane:' line(s), ${tip_values} value(s) git can read: [${tip_lane:-none}]" >&2
+        echo "" >&2
+        echo "    Either two Lane: lines disagree, or one sits outside the final trailer block" >&2
+        echo "    (a blank line before Co-Authored-By does that — Tracker#1785). Comparing" >&2
+        echo "    against it would flag every commit here as foreign, so this did not compare." >&2
+        echo "    ⇒ Fix the tip commit's trailer if you want the attribution check back." >&2
+        echo "" >&2
+    elif [ -z "$foreign" ]; then
+        echo "→ push ${rangedesc}: ${total} commit(s), all Lane: ${tip_lane:-unattributed}." >&2
+    else
+        echo "" >&2
+        echo "⚠️  THIS PUSH PUBLISHES COMMITS THAT ARE NOT YOURS (Tracker#1775)." >&2
+        echo "    ${total} commit(s) in ${rangedesc}; you are Lane: ${tip_lane:-unattributed}." >&2
+        echo "" >&2
+        printf '%s\n' "$foreign" | while IFS= read -r line; do
+            [ -n "$line" ] && echo "      ${line}" >&2
+        done
+        echo "" >&2
+        echo "    NOT BLOCKING, and not necessarily wrong: git cannot publish your commit" >&2
+        echo "    without its ancestors, so if a peer committed beneath you, theirs MUST go." >&2
+        echo "    ⇒ The defect is publishing it INVISIBLY. Now you know, and so will they." >&2
+        echo "    If that is a surprise, stop and ask that lane BEFORE you reset or rebase —" >&2
+        echo "    a shared branch that already holds the work is how a cosmetic race becomes" >&2
+        echo "    real loss." >&2
+        echo "" >&2
+    fi
+done
+
+exit 0

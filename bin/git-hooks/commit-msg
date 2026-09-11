@@ -1,0 +1,301 @@
+#!/bin/sh
+# Modernext change-management hook. TWO independent rules, both must pass:
+#
+#   RULE 1 (Tracker#96):   every commit must reference a pk802/Modernext-Tracker
+#                          issue — any "#<number>" in the message counts
+#                          (e.g. "#12", "(Tracker#12)", "pk802/Modernext-Tracker#12").
+#                          Emergency bypass: include "NOISSUE" (visible in
+#                          history — retro-filed by the weekly drift audit).
+#
+#   RULE 2 (Tracker#1785): every commit must carry a "Lane: <name>" line naming
+#                          the lane that made it, from the closed list below.
+#                          ⚠️ NOISSUE does NOT bypass this one — knowing WHO
+#                          changed something is exactly what an emergency commit
+#                          most needs, and adding "Lane: ops" costs nothing.
+#
+# Both rules read only what git will actually STORE — see the #1011 note below,
+# which applies to the Lane trailer identically: a "Lane:" line sitting in the
+# diff shown by `git commit -v` is not part of the message and must not count.
+#
+# ⛔ MATCH ONLY WHAT GIT WILL ACTUALLY STORE (Tracker#1011).
+# git hands this hook the RAW editor file, which still contains its own "#"
+# comment block and — under `git commit -v` — the entire staged diff. The
+# original version grepped that whole file, so any "#<digits>" anywhere in the
+# DIFF satisfied the check. Our source is full of "(Tracker#N)" comments, so
+# `git commit -v` accepted a message with no reference at all:
+#
+#     editor commit without -v -> REJECTED   (correct)
+#     editor commit with    -v -> ACCEPTED, stored message "update parser", 0 refs
+#
+# git strips both the comments and the scissors section before storing, so the
+# check has to look at the same text git keeps — otherwise the gate passes on
+# content that never reaches the commit message.
+msg_file="$1"
+
+# 1. Drop everything from the `-v` scissors line onward (that is the diff).
+#    Matched loosely because the rule is the ">8" marker, not an exact width.
+# 2. Then drop the remaining "#" comment lines, with git's own tool.
+body=$(sed '/^#.*>8.*$/,$d' "$msg_file" | git stripspace --strip-comments)
+
+# ── RULE 1 (Tracker#96 / #1011): the commit names a tracker issue ─────────────
+#
+# ⛔ IN A FORK, A BARE `#N` PROVES NOTHING (Tracker#1775, gateway's ruling
+# 2026-09-11). go2rtc is a FORK. Rule 1's bare `#N` is satisfied by any of the
+# 2,148 upstream commits' own issue numbers — measured: 379 commits carry some
+# `#N`, only ours carry `pk802/Modernext-Tracker#`. The gate exists so the next
+# upstream rebase can tell our commits from theirs, and a bare `#N` cannot do
+# that here. This repo therefore requires the full form; the other six keep
+# CLAUDE.md's `(Tracker#N)`.
+#
+# ⭐ It is a real boundary, not a heuristic: upstream has no reason to ever write
+# our org and repo name, so the full form cannot be produced by an upstream
+# commit by accident.
+#
+# ⚠️ Detected from the repo's OWN origin, deliberately — NOT from a
+# `git config` flag. `core.hooksPath` already taught us (#913) that per-clone
+# config is exactly what goes missing on a fresh clone, and a strictness flag
+# that silently unsets itself is worse than no flag. The origin travels with
+# every clone.
+# ⚠️ Staleness direction, stated: if that repo is ever renamed this match stops
+# firing and the gate falls back to the ordinary rule — weaker, but still a gate.
+# It degrades toward the fleet default, never toward nothing.
+_origin=$(git config --get remote.origin.url 2>/dev/null || true)
+case "$_origin" in
+  *pk802/go2rtc*) REF_RE='pk802/Modernext-Tracker#[0-9]+'; REF_WHAT='the FULL form pk802/Modernext-Tracker#N' ;;
+  *)              REF_RE='#[0-9]+';                        REF_WHAT="'(Tracker#42)'" ;;
+esac
+
+if ! printf '%s\n' "$body" | grep -qE "$REF_RE" && ! printf '%s\n' "$body" | grep -q 'NOISSUE'; then
+  echo "" >&2
+  echo "✗ COMMIT REJECTED — no tracker issue referenced (Tracker#96 rule)." >&2
+  echo "  Every change needs an issue on pk802/Modernext-Tracker." >&2
+  echo "  This repo requires: ${REF_WHAT}" >&2
+  case "$_origin" in
+    *pk802/go2rtc*)
+      echo "" >&2
+      echo "  ⚠️ This repo is a FORK, so a bare '#N' is NOT enough here — 379 of its" >&2
+      echo "     2,154 commits carry an UPSTREAM '#N' and would satisfy the normal" >&2
+      echo "     rule while telling us nothing. The full form is what lets the next" >&2
+      echo "     upstream rebase tell our commits from theirs." >&2
+      ;;
+  esac
+  echo "" >&2
+  echo "  Create one first if needed:" >&2
+  echo "    gh issue create --repo pk802/Modernext-Tracker --title '...'" >&2
+  echo "  True emergency only: include NOISSUE (it will be retro-audited)." >&2
+  echo "" >&2
+  echo "  Note: a reference inside the diff shown by 'git commit -v' does NOT" >&2
+  echo "  count — it is not part of the stored message." >&2
+  exit 1
+fi
+
+# ── RULE 2 (Tracker#1785): the commit names the LANE that made it ─────────────
+# Why a CLOSED list: a free-text trailer that any string satisfies is a gate
+# that cannot fail. The whole point is attribution, and `Lane: whatever` gives
+# none. So the accepted values live HERE, in the canonical hook, distributed by
+# ops/git-hooks/install.sh — not in a data file, because this hook runs in six
+# repos and can read the runbook at commit time in none of them.
+#
+# ⚠️ THE FAILURE THIS LIST CREATES, AND WHY THE MESSAGE BELOW IS LONG: a stale
+# list refuses a LEGITIMATE new lane. `architecture` was created 2026-09-10 and
+# would have been blocked on its first commit by a list written the day before.
+# A guard that blocks correct work without saying how to proceed gets disabled
+# by whoever it blocks — and then there is neither the gate nor the knowledge
+# that it is gone. So the refusal names the valid values AND how to add one.
+#
+# ⚠️ Includes the four committing identities that hold NO `lane:` label —
+# business (docs only, by PK's money-topics rule), pm, questions, and pk (PK's
+# own session, which may write inside any lane's boundary). Omitting them would
+# block real work by lanes that simply never appear on the tracker.
+LANES="architecture audit business cam-portal cleanup client daemon edge-hw gateway monitoring ops planning pm questions security server vms-cloud vms-local pk"
+
+# Last occurrence wins, so an amended message cannot be satisfied by a stale
+# earlier line. Value charset is deliberately narrow so the `case` match below
+# cannot be subverted by a value containing spaces or glob characters.
+lane=$(printf '%s\n' "$body" \
+       | sed -n 's/^[Ll]ane:[[:space:]]*\([A-Za-z0-9_-][A-Za-z0-9_-]*\)[[:space:]]*$/\1/p' \
+       | tail -1)
+
+# ⛔ MESSAGE SHAPE IS PART OF THE GUARD (Tracker#1785, after a live misdiagnosis).
+# The first version put the verdict first and guidance after it. A reader takes
+# the LAST line as the verdict, so a lane that hit this read the trailing
+# "do not edit an installed copy" sentence as the REASON and went looking for a
+# hook file it had supposedly edited — the real reason was the missing trailer.
+# ⇒ Context first, the actionable verdict LAST, and every sentence finishes on
+# its own line. A guard whose message misdirects costs more than the guard saves.
+_lane_context() {
+  echo "" >&2
+  echo "  ⓘ This is the COMMIT-MSG hook." >&2
+  echo "    NOT the INDEX/pre-commit guard (#1104)." >&2
+  echo "    NOT the citation drift warning (#1788)." >&2
+  echo "    Your staged files are fine — only the commit message needs changing." >&2
+  echo "" >&2
+  echo "  Valid values:" >&2
+  printf '      %s\n' "$LANES" >&2
+  echo "" >&2
+}
+
+# Only shown on the UNKNOWN-LANE branch. On the missing-trailer branch this is
+# advice for a different situation entirely — someone who simply forgot the line
+# does not need to know how to register a new lane, and it was the last thing on
+# their screen when they went hunting for a canonical file they had never edited.
+_lane_howto_add() {
+  echo "  If '$lane' IS a real lane then this list is stale — a bug in this hook," >&2
+  echo "  not in your commit. Edit ops/git-hooks/commit-msg in modernext_documentation" >&2
+  echo "  and re-distribute:  sh ops/git-hooks/install.sh <repo> ..." >&2
+  echo "  Do not edit an installed bin/git-hooks copy; the next install overwrites it." >&2
+  echo "  Do not drop the trailer to get past this." >&2
+  echo "" >&2
+}
+
+if [ -z "$lane" ]; then
+  _lane_context
+  echo "✗ COMMIT REJECTED (Tracker#1785): the message has no 'Lane:' line." >&2
+  echo "  Fix: add a line of its own, e.g.   Lane: ops" >&2
+  exit 1
+fi
+
+case " $LANES " in
+  *" $lane "*) ;;
+  *)
+    _lane_context
+    _lane_howto_add
+    echo "✗ COMMIT REJECTED (Tracker#1785): 'Lane: $lane' is not a known lane." >&2
+    echo "  Fix: use one of the values listed above." >&2
+    exit 1
+    ;;
+esac
+
+# ── RULE 2b — NORMALISE (Tracker#1785 / #1775) ────────────────────────────────
+# ⛔⛔ TWO MANDATED CONVENTIONS COLLIDE, AND THE COLLISION IS SILENT.
+# Git recognises only the LAST contiguous block of "Key: value" lines as
+# trailers. The house style writes:
+#
+#     Lane: monitoring
+#                                  <- blank line
+#     Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+#
+# The blank line SPLITS the block, so the last block is Co-Authored-By alone and
+# `Lane:` is NOT a trailer — `%(trailers:key=Lane)` returns empty. The rule above
+# still passes, because it reads the text with sed. ⇒ A commit can satisfy this
+# gate and be completely unattributable to any tool that asks git.
+#
+# ⚠️ MEASURED 2026-09-11, and this is why it is fixed here rather than noted:
+# of 11 monitoring commits made AFTER the Lane gate went live, 11 contained a
+# literal `Lane:` line and git recognised 1. The other repos matched. The
+# pre-push guard (#1775) attributes by `%(trailers:key=Lane)`, so without this
+# it reports ~90% of commits as "unattributed" — including ones that plainly
+# say `Lane: ops`. ⭐ On the server Laravel tree, where every lane commits as
+# `modernext-server` and the trailer is the ONLY discriminator, that is the
+# difference between a working guard and a decorative one.
+#
+# ⇒ So: delete the blank line(s) between the Lane line and a following trailer
+# line. Nothing else. Both conventions survive, and the trailer becomes real.
+#
+# ⛔ Compute THEN replace — never redirect over "$msg_file", because a failure
+# mid-write leaves the user's message destroyed with no copy anywhere.
+_norm=$(LC_ALL=C awk '
+  { L[NR] = $0 }
+  END {
+    i = 1
+    while (i <= NR) {
+      print L[i]
+      # Only a Lane line can start a join, and only blanks may be skipped.
+      if (L[i] ~ /^[Ll]ane:[ \t]/) {
+        j = i + 1
+        while (j <= NR && L[j] ~ /^[ \t]*$/) j++
+        # ...and only if what follows is itself trailer-shaped. If it is prose,
+        # a comment, or the end of the message, the blank line is structure and
+        # must stay: this is a no-op by design in every other shape.
+        if (j <= NR && j > i + 1 && L[j] ~ /^[A-Za-z][A-Za-z0-9_-]*:[ \t]/) {
+          i = j
+          continue
+        }
+      }
+      i++
+    }
+  }
+' "$msg_file")
+if [ -n "$_norm" ] && [ "$_norm" != "$(cat "$msg_file")" ]; then
+  _tmp="${msg_file}.lane-normalise.$$"
+  printf '%s\n' "$_norm" > "$_tmp" && mv "$_tmp" "$msg_file"
+  echo "  ↳ Lane:/Co-Authored-By: joined into one trailer block so git can read" >&2
+  echo "    'Lane:' as a trailer (Tracker#1785). Your text is otherwise untouched." >&2
+fi
+
+# ── RULE 2c — ASSERT THE PROPERTY THE GATE EXISTS FOR ─────────────────────────
+# ⛔ Everything above reads the message as TEXT. The thing that actually has to
+# be true is that GIT can read the lane, because every consumer asks git and not
+# sed: the pre-push guard (#1775), `--grep`-free lane audits, and on the server
+# Laravel tree the trailer is the only attribution that exists at all.
+# ⇒ Ask the consumer's question with the consumer's tool. A gate that verifies a
+# weaker property than the one it promises is how 11 of 11 monitoring commits
+# passed this hook and were unattributable anyway.
+# (`interpret-trailers --parse` ignores '#' comment lines, verified 2026-09-11,
+#  so this is safe against the message file git actually hands us.)
+#
+# ⛔⛔ AND PRESENCE IS NOT ENOUGH — THE TWO READERS MUST AGREE ON THE VALUE.
+# First cut of this rule asked only "does git see A Lane trailer". That still
+# validated one value (sed's `tail -1`, checked against LANES above) while the
+# consumer read another (git's full trailer set). Found 2026-09-11, an hour
+# after shipping the rule, by asking rule 12 of my own fix:
+#
+#     Lane: ops
+#                              <- blank line
+#     Co-Authored-By: X
+#     Lane: server
+#
+# sed takes `server` and validates it; git reports BOTH; `pre-push` then computes
+# `tip_lane=ops,server`, which equals no lane on the list, so EVERY commit in the
+# range is flagged foreign. ⇒ Narrowing the gap between the gate and its consumer
+# is not closing it. Assert EXACTLY ONE trailer and that it IS the validated one.
+_git_lanes=$(git interpret-trailers --parse < "$msg_file" 2>/dev/null \
+             | sed -n 's/^[Ll]ane:[[:space:]]*//p' | sed 's/[[:space:]]*$//')
+_git_lane_n=$(printf '%s\n' "$_git_lanes" | grep -c . || true)
+
+if [ "${_git_lane_n:-0}" -eq 0 ]; then
+  echo "" >&2
+  echo "  Your message HAS a 'Lane:' line, but git does not count it as a trailer." >&2
+  echo "  Git only reads the LAST unbroken block of 'Key: value' lines, so a blank" >&2
+  echo "  line — or any prose — after 'Lane:' puts it outside that block." >&2
+  echo "" >&2
+  echo "  Fix: move 'Lane: $lane' into the final block, with no blank line between" >&2
+  echo "  it and the lines around it:" >&2
+  echo "" >&2
+  echo "      Lane: $lane" >&2
+  echo "      Co-Authored-By: ..." >&2
+  echo "" >&2
+  echo "✗ COMMIT REJECTED (Tracker#1785): 'Lane:' is present but not a git trailer." >&2
+  exit 1
+fi
+
+if [ "$_git_lane_n" -gt 1 ]; then
+  echo "" >&2
+  echo "  Your message has MORE THAN ONE 'Lane:' trailer, and git reports all of them:" >&2
+  printf '%s\n' "$_git_lanes" | sed 's/^/      Lane: /' >&2
+  echo "" >&2
+  echo "  Attribution has to name ONE lane. Tools that read the trailer would get" >&2
+  echo "  the joined value, which matches no lane — so every commit alongside yours" >&2
+  echo "  reads as somebody else's." >&2
+  echo "" >&2
+  echo "  Fix: delete the ones that are not yours." >&2
+  echo "" >&2
+  echo "✗ COMMIT REJECTED (Tracker#1785): $_git_lane_n 'Lane:' trailers, expected 1." >&2
+  exit 1
+fi
+
+if [ "$_git_lanes" != "$lane" ]; then
+  echo "" >&2
+  echo "  The lane this hook validated and the lane GIT reads are different:" >&2
+  echo "      validated (last 'Lane:' line in the text) : $lane" >&2
+  echo "      what git reports as the trailer          : $_git_lanes" >&2
+  echo "" >&2
+  echo "  The second one is what every tool will see. Rather than guess which you" >&2
+  echo "  meant, this stops — a wrong attribution is worse than a missing one," >&2
+  echo "  because it is silently believed." >&2
+  echo "" >&2
+  echo "✗ COMMIT REJECTED (Tracker#1785): validated lane and git's trailer disagree." >&2
+  exit 1
+fi
+
+exit 0
